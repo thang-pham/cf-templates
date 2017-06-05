@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Launches an EC2 ASG with internal ELB, Redis Elasticache, and MySQL RDS stack"
+
+Parameters:
+  InstanceTypeParameter:
+    Type: String
+    Default: t2.small
+    Description: Instance type for EC2 instance. Default is t2.small.
+  KeyNameParameter:
+    Type: String
+    Default: tpham
+    Description: Key pair for EC2 instance.
+
+  DbUsernameParameter:
+    Type: String
+    Default: service
+    Description: Master username of MySQL instance.
+  DbUserPasswordParameter:
+    NoEcho: true
+    Type: String
+    Default: supersecret
+    Description: Master user password of MySQL instance.
+
+  VpcCidrParameter:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: VPC CIDR range where the agent will be launched.
+  VpcIdParameter:
+    Type: String
+    Default: vpc-1234abcd
+    Description: VPC ID where the agent will be launched.
+  SubnetListParameter:
+    Type: CommaDelimitedList
+    Default: subnet-00000001,subnet-00000002,subnet-00000003
+    Description: List of acceptable subnets where the agent can be launched.
+  LoadBalancerSubnetListParameter:
+    Type: CommaDelimitedList
+    Default: subnet-00000001,subnet-00000002,subnet-00000003
+    Description: List of acceptable subnets where the load balancer can be launched.
+
+  BootstrapBucketParameter:
+    Type: String
+    Default: your-application-bucket
+    Description: S3 bucket where the bootstrap code resides in.
+
+  CreatedByParameter:
+    Type: String
+    Default: tpham
+    Description: Who created this stack.
+  TeamParameter:
+    Type: String
+    Default: ControlPlane
+    Description: Team associated with this stack.
+
+Mappings:
+  RegionMapping:
+    us-east-1:
+      hvm: "ami-c58c1dd3"
+    eu-west-1:
+      hvm: "ami-01ccc867"
+
+Resources:
+  InstanceProfile:
+    "Type": "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "InstanceRole"
+
+  InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+                - "autoscaling.amazonaws.com"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "ApplicationS3BucketPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Action:
+                  - "s3:Get*"
+                  - "s3:Pull*"
+                  - "s3:List*"
+                Effect: "Allow"
+                Resource:
+                  - !Join ["", ["arn:aws:s3:::", !Ref "BootstrapBucketParameter"]]
+        -
+          PolicyName: "ApplicationPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "ec2:Describe*"
+                  - "s3:Get*"
+                  - "s3:List*"
+                  - "autoscaling:Describe*"
+                  - "cloudformation:Describe*"
+
+  SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow network access for your application"
+      Tags:
+        -
+          "Key": "Name"
+          "Value" : "application-sg"
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
+      SecurityGroupEgress:
+        -
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        -
+          CidrIp: !Ref "VpcCidrParameter"
+          FromPort: "-1"
+          IpProtocol: "-1"
+          ToPort: "-1"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "22"
+          IpProtocol: "tcp"
+          ToPort: "22"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "80"
+          IpProtocol: "tcp"
+          ToPort: "80"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "443"
+          IpProtocol: "tcp"
+          ToPort: "443"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "3306"
+          IpProtocol: "tcp"
+          ToPort: "3306"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "6379"
+          IpProtocol: "tcp"
+          ToPort: "6379"
+      VpcId: !Ref "VpcIdParameter"
+
+  LoadBalancerSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow network access for application load balancer"
+      Tags:
+        -
+          "Key": "Name"
+          "Value" : "application-elb-sg"
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
+      SecurityGroupEgress:
+        -
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        -
+          CidrIp: !Ref "VpcCidrParameter"
+          FromPort: "-1"
+          IpProtocol: "-1"
+          ToPort: "-1"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "80"
+          IpProtocol: "tcp"
+          ToPort: "80"
+        -
+          CidrIp: "10.0.0.0/8"
+          FromPort: "443"
+          IpProtocol: "tcp"
+          ToPort: "443"
+      VpcId: !Ref "VpcIdParameter"
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName: "Gopher-ELB"
+      Scheme: "internal"
+      Listeners:
+        - LoadBalancerPort: 80
+          InstancePort: 80
+          Protocol: HTTP
+      HealthCheck:
+        Target: "HTTP:80/health"
+        HealthyThreshold: "3"
+        UnhealthyThreshold: "5"
+        Interval: "30"
+        Timeout: "10"
+      SecurityGroups:
+        - !Ref "LoadBalancerSecurityGroup"
+      Subnets: !Ref "LoadBalancerSubnetListParameter"
+      Tags:
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
+
+  LaunchConfig:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      KeyName:
+        Ref: "KeyNameParameter"
+      ImageId: !FindInMap [ RegionMapping, !Ref "AWS::Region", hvm ]
+      IamInstanceProfile: !Ref "InstanceProfile"
+      SecurityGroups:
+        - Ref: "SecurityGroup"
+      InstanceType:
+        Ref: "InstanceTypeParameter"
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdc"
+          Ebs:
+            DeleteOnTermination: "true"
+            VolumeSize: "60"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          REDIS_ENDPOINT=${ElasticacheCluster.RedisEndpoint.Address}
+          DATABASE_ENDPOINT=${DBInstance.Endpoint.Address}
+          DB_USER=${DbUsernameParameter}
+          DB_PASSWORD=${DbUserPasswordParameter}
+
+          mkdir -p /opt/bootstrap
+          /usr/bin/aws s3 cp s3://${BootstrapBucketParameter}/ /opt/bootstrap --recursive
+          cd /opt/bootstrap
+          chmod +x /opt/bootstrap/*.sh
+
+          # Everything gets configured or installed using bootstrap.sh
+          /opt/bootstrap/bootstrap.sh
+
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      LaunchConfigurationName: !Ref "LaunchConfig"
+      Tags:
+        -
+          "Key": "Name"
+          "PropagateAtLaunch": "true"
+          "Value": !Join ["-", ["your", "application", !Ref "AWS::Region"]]
+        -
+          Key: "Created_By"
+          PropagateAtLaunch: "true"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          PropagateAtLaunch: "true"
+          Value: !Ref "TeamParameter"
+      MinSize: "2"
+      MaxSize: "2"
+      LoadBalancerNames:
+        - !Ref "LoadBalancer"
+      VPCZoneIdentifier:
+        -
+          !Select ["0", !Ref "SubnetListParameter"]
+      HealthCheckGracePeriod: 3600
+      HealthCheckType: "EC2"
+
+  DBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: "Dedicated MySQL database for your application"
+      SubnetIds: !Ref "SubnetListParameter"
+      Tags:
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
+
+  DBInstance:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      VPCSecurityGroups:
+        - !Ref "SecurityGroup"
+      DBSubnetGroupName: !Ref "DBSubnetGroup"
+      AllocatedStorage: "40"
+      DBInstanceClass: "db.t2.small"
+      Engine: MySQL
+      MultiAZ: "true"
+      MasterUsername: !Ref "DbUsernameParameter"
+      MasterUserPassword: !Ref "DbUserPasswordParameter"
+      PreferredMaintenanceWindow: "Sat:20:00-Sat:21:45"
+      PreferredBackupWindow: "22:00-23:45"
+      BackupRetentionPeriod: "5"
+      Tags:
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
+    DeletionPolicy: "Delete"
+
+  ElasticacheSubnetGroup:
+    Type: "AWS::ElastiCache::SubnetGroup"
+    Properties:
+      Description: "Your application Elasticache subnet group"
+      SubnetIds: !Ref "SubnetListParameter"
+
+  ElasticacheCluster:
+    Type: "AWS::ElastiCache::CacheCluster"
+    Properties:
+      AutoMinorVersionUpgrade: "true"
+      Engine: "redis"
+      CacheSubnetGroupName: !Ref "ElasticacheSubnetGroup"
+      CacheNodeType: "cache.t2.micro"
+      NumCacheNodes: "1"
+      VpcSecurityGroupIds:
+        -
+          Fn::GetAtt:
+            - "SecurityGroup"
+            - "GroupId"
+      Tags:
+        -
+          Key: "Created_By"
+          Value: !Ref "CreatedByParameter"
+        -
+          Key: "Team"
+          Value: !Ref "TeamParameter"
