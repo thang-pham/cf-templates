@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Launches a Lambda function"
+
+Parameters:
+  VpcCidrParameter:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: VPC CIDR range where the agent will be launched.
+  VpcIdParameter:
+    Type: String
+    Default: vpc-1234abcd
+    Description: VPC ID where the Lambda function will be launched.
+  SubnetListParameter:
+    Type: CommaDelimitedList
+    Default: subnet-00000001,subnet-00000002,subnet-00000003
+    Description: List of acceptable subnets where the Lambda function can be launched.
+
+  LambdaBucketParameter:
+    Type: String
+    Default: your-application-bootstrap
+    Description: Name of the S3 bucket that contains the source code of the Lambda function.
+  LambdaKeyParameter:
+    Type: String
+    Default: lambda_bundle.zip
+    Description: Location and name of the .zip file that contains your source code.
+
+  LambdaFunctionNameParameter:
+    Type: String
+    Default: your_lambda_function
+    Description: A name for the function.
+  LambdaDescriptionParameter:
+    Type: String
+    Default: Describe what your Lambda function does
+    Description: A description for the function.
+  LambdaHandlerParameter:
+    Type: String
+    Default: your_module.lambda_handler
+    Description: The name of the function that Lambda calls to start running your code.
+
+  CreatedByParameter:
+    Type: String
+    Default: tpham
+    Description: Who created this stack.
+  TeamParameter:
+    Type: String
+    Default: ControlPlane
+    Description: Team associated with this stack.
+
+Resources:
+  LambdaSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow network access for your Lambda agent"
+      Tags:
+        -
+          "Key": "Name"
+          "Value" : "your-lambda-agent"
+      SecurityGroupEgress:
+        -
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        -
+          CidrIp: !Ref "VpcCidrParameter"
+          FromPort: "-1"
+          IpProtocol: "-1"
+          ToPort: "-1"
+      VpcId: !Ref "VpcIdParameter"
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "LambdaPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:DeleteNetworkInterface"
+                  - "s3:*"
+
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Ref "LambdaFunctionNameParameter"
+      Description: !Ref "LambdaDescriptionParameter"
+      Handler: !Ref "LambdaHandlerParameter"
+      Role:
+        Fn::GetAtt:
+          - "LambdaExecutionRole"
+          - "Arn"
+      Code:
+        S3Bucket: !Ref "LambdaBucketParameter"
+        S3Key: !Ref "LambdaKeyParameter"
+      Runtime: "python2.7"
+      Timeout: "300"
+      MemorySize: 512
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref "LambdaSecurityGroup"
+        SubnetIds: !Ref "SubnetListParameter"
+      Environment:
+        Variables:
+          metric_prefix: !Ref "MetricPrefixParameter"
+          project: !Ref "ProjectNameParameter"
+          environment: !Ref "EnvironmentNameParameter"
